@@ -1,5 +1,7 @@
 # CloudOps Sentinel - Incident Response Self-RAG Copilot
 
+![CloudOps Sentinel: a Self-RAG incident copilot built with LangGraph, OpenAI, Pinecone, and FastAPI](docs/banner.png)
+
 CloudOps Sentinel is a copilot for cloud operations and incident response.
 An on-call engineer asks a question about a production problem.
 The copilot finds the answer in private runbooks and SOPs first.
