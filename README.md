@@ -15,16 +15,17 @@ Author: Muhammad Syakeer bin Abdul Rahman ([@SyakeerRahman](https://github.com/S
 1. [What the copilot does](#what-the-copilot-does)
 2. [How it works](#how-it-works)
 3. [Tech stack and the reason for each part](#tech-stack-and-the-reason-for-each-part)
-4. [Prerequisites](#prerequisites)
-5. [Setup from scratch, step by step](#setup-from-scratch-step-by-step)
-6. [Use the copilot](#use-the-copilot)
-7. [Run with Docker](#run-with-docker)
-8. [Configuration reference](#configuration-reference)
-9. [API reference](#api-reference)
-10. [Project structure](#project-structure)
-11. [Troubleshooting](#troubleshooting)
-12. [Known limits](#known-limits)
-13. [License](#license)
+4. [How each tool works, with code](#how-each-tool-works-with-code)
+5. [Prerequisites](#prerequisites)
+6. [Setup from scratch, step by step](#setup-from-scratch-step-by-step)
+7. [Use the copilot](#use-the-copilot)
+8. [Run with Docker](#run-with-docker)
+9. [Configuration reference](#configuration-reference)
+10. [API reference](#api-reference)
+11. [Project structure](#project-structure)
+12. [Troubleshooting](#troubleshooting)
+13. [Known limits](#known-limits)
+14. [License](#license)
 
 ## What the copilot does
 
@@ -120,6 +121,320 @@ The text diagram above shows the code as it is now.
 | API | FastAPI | It validates requests with Pydantic and runs the blocking graph in a thread pool. |
 | UI | HTML, CSS, and JavaScript | There is no build step. FastAPI serves the files directly. |
 | Packaging | Docker | One image runs the same way on every machine. |
+
+## How each tool works, with code
+
+This section explains each tool in simple terms.
+Each part gives a one-line summary, an example, the code in this project, and what the code does.
+The code blocks are short excerpts. Click the file link to see the full code.
+
+### 1. OpenAI chat model - the brain
+
+**Summary:** The chat model reads, thinks, and writes.
+
+**Example:** You ask "Checkout is broken. What do I check?"
+The model reads the runbook pages and writes "1. Check the pod status. 2. Check the recent deploy."
+
+**Code:** [src/self_rag.py](src/self_rag.py#L58)
+
+```python
+def _llm():
+    s = get_settings()
+    return ChatOpenAI(
+        api_key=s.openai_api_key,
+        model=s.openai_model,      # gpt-5-mini
+        temperature=0,
+    )
+```
+
+**What the code does:**
+
+- `api_key` is the password for the OpenAI API.
+- `model` selects the model (`gpt-5-mini`).
+- `temperature=0` removes randomness. For an outage fix, you want the same safe answer every time.
+
+### 2. OpenAI embeddings - meaning to numbers
+
+**Summary:** Embeddings change each sentence into a list of numbers.
+Sentences with a similar meaning get similar numbers.
+
+**Example:**
+
+| Sentence | Numbers (shortened) | Match with the question? |
+|---|---|---|
+| "Checkout returns 502" (the question) | `[0.12, -0.44, 0.91, ...]` | - |
+| "Payment page gives gateway error" | `[0.11, -0.41, 0.89, ...]` | Yes. The numbers are close. |
+| "Office leave policy" | `[-0.70, 0.33, -0.05, ...]` | No. The numbers are far apart. |
+
+A word search cannot find the second sentence, because it has different words.
+An embedding search finds it, because it has the same meaning.
+
+**Code:** [src/vectorstore.py](src/vectorstore.py#L9)
+
+```python
+def get_embeddings():
+    return OpenAIEmbeddings(
+        api_key=s.openai_api_key,
+        model=s.embedding_model,          # text-embedding-3-large
+        dimensions=s.embedding_dimension, # 3072 numbers per text
+    )
+```
+
+**What the code does:** Each text becomes a list of 3072 numbers.
+
+### 3. Pinecone - the library shelf
+
+**Summary:** Pinecone stores the number lists and finds the closest lists fast.
+
+**Example:** The 3 sample runbooks become 8 small pieces (chunks).
+When you ask a question, Pinecone returns the 5 chunks with the closest meaning.
+
+**Code, part 1 - cut the documents into chunks:** [src/ingestion.py](src/ingestion.py#L54)
+
+```python
+splitter = RecursiveCharacterTextSplitter(
+    chunk_size=800,     # each chunk has about 800 characters
+    chunk_overlap=160,  # adjacent chunks share 160 characters
+)
+```
+
+**What the code does:** The model reads a few short, relevant chunks better than a full manual.
+The overlap keeps a sentence at the edge of a chunk complete in one of the two chunks.
+
+**Code, part 2 - create the index:** [src/vectorstore.py](src/vectorstore.py#L31)
+
+```python
+if s.pinecone_index_name not in existing:
+    pc.create_index(
+        name=s.pinecone_index_name,
+        dimension=s.embedding_dimension,  # must be 3072
+        metric="cosine",                  # the measure of closeness
+    )
+```
+
+**What the code does:** If the index does not exist, the code creates it.
+The index size must match the embedding size (3072). If the sizes are different, Pinecone rejects the vectors.
+
+**Code, part 3 - search the index:** [src/vectorstore.py](src/vectorstore.py#L72)
+
+```python
+def get_retriever():
+    return get_vector_store().as_retriever(search_kwargs={"k": s.top_k})  # k = 5
+```
+
+**What the code does:** It returns the 5 chunks that match best.
+
+### 4. LangGraph - the flowchart
+
+**Summary:** LangGraph decides which step comes next.
+
+**Example:** LangGraph works like a GPS.
+If the first road is blocked, it tries another road.
+If that road is also blocked, it takes the highway (the web search).
+
+**Code, part 1 - connect the steps:** [src/self_rag.py](src/self_rag.py#L275)
+
+```python
+g.add_edge(START, "contextualize")          # first, understand the question
+g.add_edge("contextualize", "decide_retrieval")
+g.add_edge("retrieve", "grade")             # after a search, always grade
+g.add_edge("generate", "support")           # after an answer, always fact-check
+g.add_edge("commit_memory", END)            # last, save to memory
+```
+
+**What the code does:** Each line is one arrow: "after this step, go to that step."
+
+**Code, part 2 - make a decision:** [src/self_rag.py](src/self_rag.py#L165)
+
+```python
+def route_after_relevance(state):
+    if state.get("relevant_docs"):
+        return "generate"            # good chunks found: write the answer
+    if state.get("retrieval_rewrites", 0) < s.max_retrieval_rewrites:
+        return "rewrite_internal"    # no good chunks: change the query, search again
+    return "rewrite_web"             # the limit is reached: search the internet
+```
+
+**What the code does:** This function is the "if X, go to Y" logic. It is the core of Self-RAG.
+
+### 5. The self-checks - LangGraph steps that use OpenAI
+
+**Summary:** The copilot grades its own work before it shows the answer.
+
+**Example:** A student writes an exam answer, then reads it again.
+The student asks: "Did I get this from the textbook, or did I invent it?"
+
+**Code - grade each chunk:** [src/self_rag.py](src/self_rag.py#L147)
+
+```python
+("system", "Judge relevance at the topic/evidence level. A document is relevant when it
+            contains information useful for answering the user's question. ...
+            Be strict about unrelated content."),
+```
+
+**What the code does:** The model checks if each chunk is about the question. The code removes the chunks that are not.
+
+**Code - fact-check the answer (IsSUP):** [src/self_rag.py](src/self_rag.py#L223)
+
+```python
+("system", "Verify whether every meaningful claim in the answer is supported by the
+            supplied evidence. ..."),
+```
+
+**What the code does:** The model checks that each claim in the answer comes from the chunks.
+If a claim does not, the `revise` step writes the answer again.
+This check stops the copilot from inventing facts.
+
+### 6. Tavily - the backup search
+
+**Summary:** Tavily searches the internet. The copilot uses it only when the runbooks do not have the answer.
+
+**Example:** You ask "How do I fix a Kubernetes ImagePullBackOff error?"
+The runbooks do not cover this error.
+The copilot searches the web and labels the answer as external guidance.
+
+**Code:** [src/self_rag.py](src/self_rag.py#L196)
+
+```python
+def web_search(state):
+    if not s.tavily_api_key:
+        return {..., "trace": "Internet search unavailable: TAVILY_API_KEY missing"}
+    client = TavilyClient(api_key=s.tavily_api_key)
+    response = client.search(query=q, search_depth="advanced", max_results=5)
+    ...
+    metadata={"source_type": "web", ...}   # mark the result as web evidence
+```
+
+**What the code does:**
+
+- If there is no API key, the code skips the search and records the reason in the trace.
+- It gets 5 web results.
+- It marks each result as `web`. Thus, the answer never presents internet advice as company procedure.
+
+### 7. FastAPI - the front desk
+
+**Summary:** FastAPI receives the question from the browser and sends back the answer.
+
+**Example:** FastAPI works like a waiter.
+You give the order (the question). The waiter takes it to the kitchen (LangGraph). Then the waiter brings the food (the answer).
+
+**Code:** [app.py](app.py#L53)
+
+```python
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(payload: ChatRequest):
+    result = await run_in_threadpool(run_self_rag, payload.question.strip(), payload.thread_id.strip())
+    await run_in_threadpool(save_audit, payload.question, result)
+    return ChatResponse(**result)
+```
+
+**What the code does:**
+
+- `@app.post("/api/chat")` connects this function to the `/api/chat` address.
+- `run_self_rag(...)` sends the question through the Self-RAG graph.
+- `save_audit(...)` writes the result to the audit log.
+- `return` sends the answer to the browser.
+
+### 8. SQLite - the notebooks
+
+**Summary:** SQLite stores data in a single file. This project uses two SQLite files.
+
+#### Notebook A - the conversation memory
+
+**Example:**
+
+1. You ask "Checkout gives 502 errors. What do I check?"
+2. You ask "What if that does not work?"
+3. The copilot knows that "that" means the checkout 502 errors, because it kept the first question in memory.
+
+**Code - save the turn:** [src/self_rag.py](src/self_rag.py#L109)
+
+```python
+def commit_memory(state):
+    entry = f"User: {user_question}\nAssistant ({route}): {answer}"
+    return {"memory": [entry]}
+```
+
+**Code - the memory file:** [src/self_rag.py](src/self_rag.py#L315)
+
+```python
+conn = sqlite3.connect(str(db_path), check_same_thread=False)   # data/langgraph_memory.sqlite
+checkpointer = SqliteSaver(conn)
+```
+
+**What the code does:** After each answer, the code writes "the user said X, the copilot said Y" to the file.
+On the next question with the same `thread_id`, LangGraph reads it back.
+
+#### Notebook B - the audit log
+
+**Example:** A manager asks "What did the copilot tell the engineer last night?"
+The audit log shows the question, the answer, and the sources.
+
+**Code:** [src/db.py](src/db.py#L28)
+
+```python
+conn.execute(
+    """INSERT INTO rag_audit
+    (created_at, question, answer, route, used_web, support_status, usefulness, trace_json, sources_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", ...)
+```
+
+**What the code does:** It adds one row for each question.
+The row records the time, the question, the answer, the route, and whether the copilot used the web.
+
+### 9. JavaScript - the screen
+
+**Summary:** The JavaScript on the web page sends the question and shows the reply.
+
+**Example:** You type in the chat box and press Enter.
+The JavaScript sends the text to FastAPI and shows the answer in a new chat bubble.
+
+**Code:** [static/app.js](static/app.js#L36)
+
+```javascript
+const r = await fetch('/api/chat', {
+  method: 'POST',
+  headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify({question, thread_id: threadId})
+});
+```
+
+**What the code does:** It sends the question and the session ID (`thread_id`) to the server.
+The session ID tells the memory that the question belongs to the same conversation.
+
+### 10. Docker - the shipping box
+
+**Summary:** Docker puts the app and all its libraries in one package. The package runs the same way on every computer.
+
+**Example:** Docker works like a lunchbox. Everything that you need is inside. You can open it anywhere.
+
+**Code:** [Dockerfile](Dockerfile)
+
+```dockerfile
+FROM python:3.11-slim                    # start from an image with Python
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt   # install the libraries
+COPY . .                                 # copy the project
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8080}"]   # start the server
+```
+
+**What the code does:** It starts from a clean image with Python, installs the libraries, copies the project, and starts the server on port 8080.
+
+### One question from start to end
+
+| Step | What happens | Tool |
+|---|---|---|
+| 1 | You type "Checkout gives 502 errors." | JavaScript |
+| 2 | The question arrives at the server. | FastAPI |
+| 3 | The copilot reads the memory to see if the question is a follow-up. | SQLite and LangGraph |
+| 4 | The question becomes a list of numbers. | OpenAI embeddings |
+| 5 | The copilot finds the 5 closest runbook chunks. | Pinecone |
+| 6 | The copilot removes the chunks that do not match. | OpenAI and LangGraph |
+| 7 | If no chunk matches, the copilot searches the web. | Tavily |
+| 8 | The copilot writes the answer. | OpenAI |
+| 9 | The copilot checks the answer for invented claims. | OpenAI and LangGraph |
+| 10 | The copilot saves the turn to the memory and to the audit log. | SQLite |
+| 11 | The answer appears on your screen. | JavaScript |
 
 ## Prerequisites
 
