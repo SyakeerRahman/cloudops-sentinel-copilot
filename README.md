@@ -22,7 +22,7 @@ Author: Muhammad Syakeer bin Abdul Rahman ([@SyakeerRahman](https://github.com/S
 10. [Project structure](#project-structure)
 11. [Troubleshooting](#troubleshooting)
 12. [Known limits](#known-limits)
-13. [License and acknowledgements](#license-and-acknowledgements)
+13. [License](#license)
 
 ## What the copilot does
 
@@ -607,8 +607,6 @@ cloudops-sentinel-copilot/
 - If you change the chunk size in `src/ingestion.py`, the chunk IDs change.
   The old vectors stay in Pinecone. Delete the namespace, then run the ingestion again.
 
-## License and acknowledgements
+## License
 
 This project is released under the MIT License. See [LICENSE](LICENSE).
-
-Acknowledgements: This project is based on the CloudOps Sentinel tutorial by Bappy Ahmed (MIT License).
